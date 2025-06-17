@@ -1,6 +1,7 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { cookies } from 'next/headers';
 import { sql } from './db';
+import bcrypt from 'bcryptjs';
 
 const secret = new TextEncoder().encode(process.env.JWT_SECRET!);
 const alg = 'HS256';
@@ -10,6 +11,14 @@ export interface User {
   email: string;
   name: string;
   role: 'admin' | 'manager' | 'viewer';
+}
+
+export async function hashPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, 10);
+}
+
+export async function verifyPassword(password: string, hashedPassword: string): Promise<boolean> {
+  return bcrypt.compare(password, hashedPassword);
 }
 
 export async function signToken(user: User): Promise<string> {
@@ -36,11 +45,50 @@ export async function getUser(): Promise<User | null> {
 }
 
 export async function login(email: string, password: string): Promise<User | null> {
-  // In production, properly hash passwords
   const result = await sql`
-    SELECT id, email, name, role 
+    SELECT id, email, name, role, password_hash 
     FROM users 
-    WHERE email = ${email} AND password = crypt(${password}, password)
+    WHERE email = ${email}
+  `;
+  
+  if (result.length === 0) return null;
+  
+  const user = result[0];
+  const isValid = await verifyPassword(password, user.password_hash);
+  
+  if (!isValid) return null;
+  
+  const { password_hash, ...userWithoutPassword } = user;
+  const token = await signToken(userWithoutPassword as User);
+  
+  cookies().set('auth-token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24, // 24 hours
+  });
+  
+  return userWithoutPassword as User;
+}
+
+export async function register(email: string, password: string, name: string): Promise<User | null> {
+  // Check if user already exists
+  const existing = await sql`
+    SELECT id FROM users WHERE email = ${email}
+  `;
+  
+  if (existing.length > 0) {
+    throw new Error('User already exists');
+  }
+  
+  // Hash the password
+  const passwordHash = await hashPassword(password);
+  
+  // Create the user with default viewer role
+  const result = await sql`
+    INSERT INTO users (email, password_hash, name, role)
+    VALUES (${email}, ${passwordHash}, ${name}, 'viewer')
+    RETURNING id, email, name, role
   `;
   
   if (result.length === 0) return null;
